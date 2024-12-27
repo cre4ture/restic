@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"bufio"
@@ -144,7 +144,7 @@ func printExitError(code int, message string) {
 	}
 }
 
-func main() {
+func Main() {
 	tweakGoGC()
 	// install custom global logger into a buffer, if an error occurs
 	// we can show the logs

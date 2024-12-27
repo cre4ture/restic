@@ -209,7 +209,8 @@ func NewSnapshotWriter(
 	opts SnapshotOptions,
 	CompleteBlob func(bytes uint64),
 	Error ErrorFunc,
-	NodeFromFileInfo func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error)) *SnapshotWriter {
+	NodeFromFileInfo func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error),
+) *SnapshotWriter {
 	wgUp, wgUpCtx := errgroup.WithContext(ctx)
 	return &SnapshotWriter{
 		repo:             repo,

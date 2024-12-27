@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"github.com/spf13/cobra"

@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"io"

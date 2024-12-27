@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"context"
@@ -41,6 +41,10 @@ func openWithReadLock(ctx context.Context, gopts GlobalOptions, noLock bool) (co
 func openWithAppendLock(ctx context.Context, gopts GlobalOptions, dryRun bool) (context.Context, *repository.Repository, func(), error) {
 	// TODO enforce non-exclusive operations once the locking code has moved to the repository
 	return internalOpenWithLocked(ctx, gopts, dryRun, false)
+}
+
+func OpenWithAppendLock(ctx context.Context, gopts GlobalOptions, dryRun bool) (context.Context, *repository.Repository, func(), error) {
+	return openWithAppendLock(ctx, gopts, dryRun)
 }
 
 func openWithExclusiveLock(ctx context.Context, gopts GlobalOptions, dryRun bool) (context.Context, *repository.Repository, func(), error) {
