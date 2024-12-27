@@ -55,7 +55,7 @@ import (
 var config = Config{
 	Name:             "restic",                                 // name of the program executable and directory
 	Namespace:        "github.com/restic/restic",               // subdir of GOPATH, e.g. "github.com/foo/bar"
-	Main:             "./cmd/restic",                           // package name for the main package
+	Main:             ".",                                      // package name for the main package
 	DefaultBuildTags: []string{"selfupdate"},                   // specify build tags which are always used
 	Tests:            []string{"./..."},                        // tests to run
 	MinVersion:       GoVersion{Major: 1, Minor: 21, Patch: 0}, // minimum Go version supported
