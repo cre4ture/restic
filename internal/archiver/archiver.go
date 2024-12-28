@@ -896,6 +896,10 @@ type SnapshotWriter struct {
 	NodeFromFileInfo func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error)
 }
 
+func (snw *SnapshotWriter) GetRepo() archiverRepo {
+	return snw.repo
+}
+
 func (snw *SnapshotWriter) GetSavers() (blobSaver *blobSaver, fileSaver *fileSaver, treeSaver *treeSaver) {
 	return snw.blobSaver, snw.fileSaver, snw.treeSaver
 }

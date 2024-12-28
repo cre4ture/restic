@@ -149,3 +149,7 @@ func (a *EasyArchiver) UpdateFile(
 
 	return nil
 }
+
+func (a *EasyArchiver) LoadDataBlob(ctx context.Context, id model.ID) ([]byte, error) {
+	return a.writer.GetRepo().LoadBlob(ctx, restic.DataBlob, id, nil)
+}
