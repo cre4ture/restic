@@ -124,6 +124,21 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 	s.saveFileGeneric(ctx, fch, snPath, target, fr, start, finishReading, finish)
 }
 
+func (s *fileSaver) SaveFileGeneric(
+	ctx context.Context,
+	fch filechunker.ChunkerI,
+	snPath string,
+	target string,
+	f CloseAndToNoder,
+	start func(),
+	finishReading func(),
+	finish func(snPath, target string, stats ItemStats, err error),
+) {
+	s.saveFileGeneric(ctx, fch, snPath, target, f, start, finishReading, func(res futureNodeResult) {
+		finish(res.snPath, res.target, res.stats, res.err)
+	})
+}
+
 func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.ChunkerI, snPath string, target string, f CloseAndToNoder, start func(), finishReading func(), finish func(res futureNodeResult)) {
 
 	start()
