@@ -3,6 +3,7 @@ package model
 import "github.com/restic/restic/internal/restic"
 
 type ID = restic.ID
+type IDs = restic.IDs
 type Node = restic.Node
 type NodeType = restic.NodeType
 
