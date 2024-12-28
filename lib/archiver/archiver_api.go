@@ -49,11 +49,13 @@ func (a *EasyArchiver) Close() {
 	a.unlock()
 }
 
+type DownloadBlockDataCallback func(blockIdx uint64, hash []byte) ([]byte, error)
+
 type EasyFileChunker struct {
 	blockSize           uint64
 	hashList            model.IDs
 	currentIdx          uint
-	downloadBlockDataCb func(hash []byte) ([]byte, error)
+	downloadBlockDataCb DownloadBlockDataCallback
 }
 
 // Next implements filechunker.ChunkerI.
@@ -61,7 +63,7 @@ func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
 	nextChunk := &EasyFileChunk{
 		blockSize:           e.blockSize,
 		hash:                e.hashList[e.currentIdx],
-		currentIdx:          e.currentIdx,
+		blockIdx:            e.currentIdx,
 		downloadBlockDataCb: e.downloadBlockDataCb,
 		data:                nil,
 	}
@@ -73,16 +75,16 @@ func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
 
 type EasyFileChunk struct {
 	blockSize           uint64
-	currentIdx          uint
+	blockIdx            uint
 	hash                [32]byte
-	downloadBlockDataCb func(hash []byte) ([]byte, error)
+	downloadBlockDataCb DownloadBlockDataCallback
 	data                []byte
 }
 
 // Data implements filechunker.ChunkI.
 func (e *EasyFileChunk) Data() []byte {
 	if e.data == nil {
-		data, err := e.downloadBlockDataCb(e.hash[:])
+		data, err := e.downloadBlockDataCb(uint64(e.blockIdx), e.hash[:])
 		if err != nil {
 			panic(fmt.Sprintf("EasyFileChunk(): error downloading block data: %v", err))
 		}
@@ -127,13 +129,14 @@ func (a *EasyArchiver) UpdateFile(
 	meta *model.Node,
 	blockSize uint64,
 	hashList model.IDs,
-	downloadBlockDataCb func(hash []byte) ([]byte, error),
+	downloadBlockDataCb DownloadBlockDataCallback,
 ) error {
 	_, fileSaver, _ := a.writer.GetSavers()
 	fch := &EasyFileChunker{
-		blockSize:  blockSize,
-		hashList:   hashList,
-		currentIdx: 0,
+		blockSize:           blockSize,
+		hashList:            hashList,
+		currentIdx:          0,
+		downloadBlockDataCb: downloadBlockDataCb,
 	}
 	f := &EasyFile{meta: meta}
 	fileSaver.SaveFileGeneric(ctx, fch, path, path, f, func() {
