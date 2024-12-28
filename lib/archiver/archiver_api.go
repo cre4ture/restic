@@ -8,6 +8,7 @@ import (
 	"github.com/restic/restic/internal/archiver"
 	"github.com/restic/restic/internal/filechunker"
 	"github.com/restic/restic/internal/restic"
+	"github.com/restic/restic/lib/model"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -106,7 +107,7 @@ func (e *EasyFileChunk) Size() uint64 {
 }
 
 type EasyFile struct {
-	meta *restic.Node
+	meta *model.Node
 }
 
 // Close implements archiver.CloseAndToNoder.
@@ -123,6 +124,7 @@ func (e *EasyFile) ToNode(ignoreXattrListError bool) (*restic.Node, error) {
 func (a *EasyArchiver) UpdateFile(
 	ctx context.Context,
 	path string,
+	meta *model.Node,
 	blockSize uint64,
 	hashList [][32]byte,
 	downloadBlockDataCb func(hash []byte) ([]byte, error),
@@ -133,14 +135,7 @@ func (a *EasyArchiver) UpdateFile(
 		hashList:   hashList,
 		currentIdx: 0,
 	}
-	f := &EasyFile{
-		meta: &restic.Node{
-			Name:    path,
-			Type:    restic.NodeTypeFile,
-			Mode:    0644,
-			ModTime: restic.Time{},
-		},
-	}
+	f := &EasyFile{meta: meta}
 	fileSaver.SaveFileGeneric(ctx, fch, path, path, f, func() {
 		// start
 	}, func() {
