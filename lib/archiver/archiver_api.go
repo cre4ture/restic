@@ -51,7 +51,7 @@ func (a *EasyArchiver) Close() {
 
 type EasyFileChunker struct {
 	blockSize           uint64
-	hashList            [][32]byte
+	hashList            model.IDs
 	currentIdx          uint
 	downloadBlockDataCb func(hash []byte) ([]byte, error)
 }
@@ -126,7 +126,7 @@ func (a *EasyArchiver) UpdateFile(
 	path string,
 	meta *model.Node,
 	blockSize uint64,
-	hashList [][32]byte,
+	hashList model.IDs,
 	downloadBlockDataCb func(hash []byte) ([]byte, error),
 ) error {
 	_, fileSaver, _ := a.writer.GetSavers()
