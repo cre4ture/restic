@@ -44,7 +44,7 @@ type EasyArchiveWriter struct {
 func NewEasyArchiveWriter(
 	ctx context.Context,
 	options EasyArchiverOptions,
-	workCb func(context.Context, *errgroup.Group) error,
+	workCb func(ctx context.Context, eaw *EasyArchiveWriter) error,
 ) (*EasyArchiveWriter, error) {
 	lockCtx, repo, unlock, err := cm_main.OpenWithAppendLock(ctx, options, false)
 	if err != nil {
@@ -66,18 +66,23 @@ func NewEasyArchiveWriter(
 	writer.StartPackUploader()
 
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		writer.StartWorker(workCb)
-	}()
 
-	return &EasyArchiveWriter{
+	eaw := &EasyArchiveWriter{
 		options: options,
 		writer:  writer,
 		wg:      wg,
 		unlock:  unlock,
-	}, nil
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
+			return workCb(ctx, eaw)
+		})
+	}()
+
+	return eaw, nil
 }
 
 func (a *EasyArchiveWriter) Close() {
