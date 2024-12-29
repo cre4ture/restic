@@ -3,6 +3,7 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	cm_main "github.com/restic/restic/cmd/restic"
 	"github.com/restic/restic/internal/archiver"
@@ -12,13 +13,24 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type EasyArchiverOptions = cm_main.GlobalOptions
+
+func GetDefaultEasyArchiverOptions() EasyArchiverOptions {
+	return cm_main.GetGlobalOptions()
+}
+
 type EasyArchiver struct {
 	writer *archiver.SnapshotWriter
+	wg     *sync.WaitGroup
 	unlock func()
 }
 
-func NewEasyArchiver(ctx context.Context, workCb func(context.Context, *errgroup.Group) error) (*EasyArchiver, error) {
-	lockCtx, repo, unlock, err := cm_main.OpenWithAppendLock(ctx, cm_main.GlobalOptions{}, false)
+func NewEasyArchiver(
+	ctx context.Context,
+	options EasyArchiverOptions,
+	workCb func(context.Context, *errgroup.Group) error,
+) (*EasyArchiver, error) {
+	lockCtx, repo, unlock, err := cm_main.OpenWithAppendLock(ctx, options, false)
 	if err != nil {
 		return nil, err
 	}
@@ -37,15 +49,22 @@ func NewEasyArchiver(ctx context.Context, workCb func(context.Context, *errgroup
 
 	writer.StartPackUploader()
 
-	go writer.StartWorker(workCb)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		writer.StartWorker(workCb)
+	}()
 
 	return &EasyArchiver{
 		writer: writer,
+		wg:     wg,
 		unlock: unlock,
 	}, nil
 }
 
 func (a *EasyArchiver) Close() {
+	a.wg.Wait()
 	a.unlock()
 }
 
@@ -152,4 +171,8 @@ func (a *EasyArchiver) UpdateFile(
 
 func (a *EasyArchiver) LoadDataBlob(ctx context.Context, id model.ID) ([]byte, error) {
 	return a.writer.GetRepo().LoadBlob(ctx, restic.DataBlob, id, nil)
+}
+
+func (a *EasyArchiver) LoadMetaDataBlob(ctx context.Context, id model.ID) ([]byte, error) {
+	return a.writer.GetRepo().LoadBlob(ctx, restic.TreeBlob, id, nil)
 }

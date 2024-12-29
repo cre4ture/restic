@@ -166,6 +166,10 @@ func init() {
 	}
 }
 
+func GetGlobalOptions() GlobalOptions {
+	return globalOptions
+}
+
 func stdinIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
