@@ -257,6 +257,12 @@ func Warnf(format string, args ...interface{}) {
 	debug.Log(format, args...)
 }
 
+func ResolvePassword(opts *GlobalOptions) error {
+	err := error(nil)
+	opts.password, err = resolvePassword(*opts, "RESTIC_PASSWORD")
+	return err
+}
+
 // resolvePassword determines the password to be used for opening the repository.
 func resolvePassword(opts GlobalOptions, envStr string) (string, error) {
 	if opts.PasswordFile != "" && opts.PasswordCommand != "" {

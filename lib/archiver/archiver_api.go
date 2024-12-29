@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ var ErrNoRepository = cm_main.ErrNoRepository
 
 type EasyArchiverOptions = cm_main.GlobalOptions
 type EasyArchiverInitOptions = cm_main.InitOptions
+type EasyArchiverSnapshotOptions = archiver.SnapshotOptions
 type TagLists = restic.TagLists
 
 func GetDefaultEasyArchiverOptions() EasyArchiverOptions {
@@ -47,6 +49,7 @@ func InitNewRepository(
 	opts cm_main.InitOptions,
 	gopts cm_main.GlobalOptions,
 ) error {
+	cm_main.ResolvePassword(&gopts)
 	err := cm_main.RunInit(ctx, opts, gopts)
 	if err != nil {
 		return err
@@ -57,13 +60,32 @@ func InitNewRepository(
 
 func NewEasyArchiveWriter(
 	ctx context.Context,
+	hostname string,
 	targets []string,
 	options EasyArchiverOptions,
 	workCb func(ctx context.Context, eaw *EasyArchiveWriter) error,
 ) (*EasyArchiveWriter, error) {
+
+	cm_main.ResolvePassword(&options)
+
 	lockCtx, repo, unlock, err := cm_main.OpenWithAppendLock(ctx, options, false)
 	if err != nil {
 		return nil, err
+	}
+
+	err = repo.LoadIndex(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	snOptions := EasyArchiverSnapshotOptions{
+		Tags:            nil,
+		Hostname:        hostname,
+		Excludes:        nil,
+		BackupStart:     time.Now(),
+		Time:            time.Now(),
+		ProgramVersion:  "syncthing",
+		SkipIfUnchanged: true,
 	}
 
 	saveOptions := archiver.Options{}.ApplyDefaults()
@@ -72,7 +94,7 @@ func NewEasyArchiveWriter(
 		lockCtx,
 		repo,
 		saveOptions,
-		archiver.SnapshotOptions{},
+		snOptions,
 		func(bytes uint64) {},
 		func(file string, err error) error { return err },
 		func(snPath, filename string, meta archiver.ToNoder, ignoreXattrListError bool) (*restic.Node, error) {
@@ -101,44 +123,49 @@ func NewEasyArchiveWriter(
 		writer.StartPackUploader()
 		err := writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
 			ch <- nil
-			return workCb(ctx, eaw)
+			err := workCb(ctx, eaw)
+			if err != nil {
+				return err
+			}
+
+			rootTreeID, err := restic.SaveTree(lockCtx, repo, eaw.root)
+			if err != nil {
+				return err
+			}
+
+			snap, err := writer.PrepareSnapshot(targets)
+			if err != nil {
+				return err
+			}
+
+			snap.Tree = &rootTreeID
+			summary.BackupEnd = time.Now()
+			snap.Summary = &restic.SnapshotSummary{
+				BackupStart: summary.BackupStart,
+				BackupEnd:   summary.BackupEnd,
+
+				FilesNew:            summary.Files.New,
+				FilesChanged:        summary.Files.Changed,
+				FilesUnmodified:     summary.Files.Unchanged,
+				DirsNew:             summary.Dirs.New,
+				DirsChanged:         summary.Dirs.Changed,
+				DirsUnmodified:      summary.Dirs.Unchanged,
+				DataBlobs:           summary.ItemStats.DataBlobs,
+				TreeBlobs:           summary.ItemStats.TreeBlobs,
+				DataAdded:           summary.ItemStats.DataSize + summary.ItemStats.TreeSize,
+				DataAddedPacked:     summary.ItemStats.DataSizeInRepo + summary.ItemStats.TreeSizeInRepo,
+				TotalFilesProcessed: summary.Files.New + summary.Files.Changed + summary.Files.Unchanged,
+				TotalBytesProcessed: summary.ProcessedBytes,
+			}
+
+			_, err = restic.SaveSnapshot(lockCtx, repo, snap)
+			if err != nil {
+				return err
+			}
+
+			return nil
 		})
 
-		if err != nil {
-			return err
-		}
-
-		snap, err := writer.PrepareSnapshot(targets)
-		if err != nil {
-			return err
-		}
-
-		rootTreeID, err := restic.SaveTree(lockCtx, repo, eaw.root)
-		if err != nil {
-			return err
-		}
-
-		snap.Tree = &rootTreeID
-		summary.BackupEnd = time.Now()
-		snap.Summary = &restic.SnapshotSummary{
-			BackupStart: summary.BackupStart,
-			BackupEnd:   summary.BackupEnd,
-
-			FilesNew:            summary.Files.New,
-			FilesChanged:        summary.Files.Changed,
-			FilesUnmodified:     summary.Files.Unchanged,
-			DirsNew:             summary.Dirs.New,
-			DirsChanged:         summary.Dirs.Changed,
-			DirsUnmodified:      summary.Dirs.Unchanged,
-			DataBlobs:           summary.ItemStats.DataBlobs,
-			TreeBlobs:           summary.ItemStats.TreeBlobs,
-			DataAdded:           summary.ItemStats.DataSize + summary.ItemStats.TreeSize,
-			DataAddedPacked:     summary.ItemStats.DataSizeInRepo + summary.ItemStats.TreeSizeInRepo,
-			TotalFilesProcessed: summary.Files.New + summary.Files.Changed + summary.Files.Unchanged,
-			TotalBytesProcessed: summary.ProcessedBytes,
-		}
-
-		_, err = restic.SaveSnapshot(lockCtx, repo, snap)
 		if err != nil {
 			return err
 		}
@@ -255,13 +282,17 @@ func (a *EasyArchiveWriter) UpdateFile(
 		downloadBlockDataCb: downloadBlockDataCb,
 	}
 	f := &EasyFile{meta: meta}
+	ch := make(chan error)
 	fileSaver.SaveFileGeneric(ctx, fch, path, path, f, func() {
 		// start
 	}, func() {
 		// completeReading
 	}, func(snPath, target string, stats archiver.ItemStats, err error) {
 		// finish
+		close(ch)
 	})
+
+	<-ch
 
 	a.root.Nodes = append(a.root.Nodes, meta)
 
@@ -273,7 +304,15 @@ func (a *EasyArchiveReader) LoadDataBlob(ctx context.Context, id model.ID) ([]by
 }
 
 func NewEasyArchiveReader(ctx context.Context, options EasyArchiverOptions) (*EasyArchiveReader, error) {
+
+	cm_main.ResolvePassword(&options)
+
 	ctx, repo, unlock, err := cm_main.OpenWithReadLock(ctx, options, options.NoLock)
+	if err != nil {
+		return nil, err
+	}
+
+	err = repo.LoadIndex(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +363,7 @@ func (a *EasyArchiveReader) ReadFile(
 	ErrFoundFile := fmt.Errorf("found file")
 	var resultNode *restic.Node = nil
 
-	processNode := func(_ restic.ID, nodepath string, node *restic.Node, err error) error {
+	processNode := func(nodeId restic.ID, nodepath string, node *restic.Node, err error) error {
 		if err != nil {
 			return err
 		}
@@ -354,8 +393,14 @@ func (a *EasyArchiveReader) ReadFile(
 		},
 	})
 
-	if err != nil {
-		return nil, err
+	if errors.Is(err, ErrFoundFile) {
+		err = nil
+	} else {
+		if err != nil {
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("file not found")
 	}
 
 	log.Default().Printf("resultNode: %v", resultNode)
