@@ -3,8 +3,9 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
-	"sync"
+	"time"
 
 	cm_main "github.com/restic/restic/cmd/restic"
 	"github.com/restic/restic/internal/archiver"
@@ -36,8 +37,9 @@ type EasyArchiveReader struct {
 type EasyArchiveWriter struct {
 	options EasyArchiverOptions
 	writer  *archiver.SnapshotWriter
-	wg      *sync.WaitGroup
+	wg      *errgroup.Group
 	unlock  func()
+	root    *restic.Tree
 }
 
 func InitNewRepository(
@@ -55,6 +57,7 @@ func InitNewRepository(
 
 func NewEasyArchiveWriter(
 	ctx context.Context,
+	targets []string,
 	options EasyArchiverOptions,
 	workCb func(ctx context.Context, eaw *EasyArchiveWriter) error,
 ) (*EasyArchiveWriter, error) {
@@ -77,26 +80,71 @@ func NewEasyArchiveWriter(
 		},
 	)
 
-	wg := &sync.WaitGroup{}
+	wg, _ := errgroup.WithContext(lockCtx)
 
 	eaw := &EasyArchiveWriter{
 		options: options,
 		writer:  writer,
 		wg:      wg,
 		unlock:  unlock,
+		root:    nil,
 	}
 
-	ch := make(chan struct{})
+	ch := make(chan error)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() error {
+
+		summary := &archiver.Summary{
+			BackupStart: time.Now(),
+		}
+
 		writer.StartPackUploader()
-		writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
-			ch <- struct{}{}
+		err := writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
+			ch <- nil
 			return workCb(ctx, eaw)
 		})
-	}()
+
+		if err != nil {
+			return err
+		}
+
+		snap, err := writer.PrepareSnapshot(targets)
+		if err != nil {
+			return err
+		}
+
+		rootTreeID, err := restic.SaveTree(lockCtx, repo, eaw.root)
+		if err != nil {
+			return err
+		}
+
+		snap.Tree = &rootTreeID
+		summary.BackupEnd = time.Now()
+		snap.Summary = &restic.SnapshotSummary{
+			BackupStart: summary.BackupStart,
+			BackupEnd:   summary.BackupEnd,
+
+			FilesNew:            summary.Files.New,
+			FilesChanged:        summary.Files.Changed,
+			FilesUnmodified:     summary.Files.Unchanged,
+			DirsNew:             summary.Dirs.New,
+			DirsChanged:         summary.Dirs.Changed,
+			DirsUnmodified:      summary.Dirs.Unchanged,
+			DataBlobs:           summary.ItemStats.DataBlobs,
+			TreeBlobs:           summary.ItemStats.TreeBlobs,
+			DataAdded:           summary.ItemStats.DataSize + summary.ItemStats.TreeSize,
+			DataAddedPacked:     summary.ItemStats.DataSizeInRepo + summary.ItemStats.TreeSizeInRepo,
+			TotalFilesProcessed: summary.Files.New + summary.Files.Changed + summary.Files.Unchanged,
+			TotalBytesProcessed: summary.ProcessedBytes,
+		}
+
+		_, err = restic.SaveSnapshot(lockCtx, repo, snap)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
 
 	<-ch
 
@@ -119,6 +167,11 @@ type EasyFileChunker struct {
 
 // Next implements filechunker.ChunkerI.
 func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
+
+	if e.currentIdx >= uint(len(e.hashList)) {
+		return nil, io.EOF
+	}
+
 	nextChunk := &EasyFileChunk{
 		blockSize:           e.blockSize,
 		hash:                e.hashList[e.currentIdx],
@@ -187,13 +240,17 @@ func (a *EasyArchiveWriter) UpdateFile(
 	path string,
 	meta *model.Node,
 	blockSize uint64,
-	hashList model.IDs,
 	downloadBlockDataCb DownloadBlockDataCallback,
 ) error {
+
+	if a.root == nil {
+		a.root = &restic.Tree{}
+	}
+
 	_, fileSaver, _ := a.writer.GetSavers()
 	fch := &EasyFileChunker{
 		blockSize:           blockSize,
-		hashList:            hashList,
+		hashList:            meta.Content,
 		currentIdx:          0,
 		downloadBlockDataCb: downloadBlockDataCb,
 	}
@@ -205,6 +262,8 @@ func (a *EasyArchiveWriter) UpdateFile(
 	}, func(snPath, target string, stats archiver.ItemStats, err error) {
 		// finish
 	})
+
+	a.root.Nodes = append(a.root.Nodes, meta)
 
 	return nil
 }
