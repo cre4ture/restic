@@ -16,7 +16,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var ErrNoRepository = cm_main.ErrNoRepository
+
 type EasyArchiverOptions = cm_main.GlobalOptions
+type EasyArchiverInitOptions = cm_main.InitOptions
 type TagLists = restic.TagLists
 
 func GetDefaultEasyArchiverOptions() EasyArchiverOptions {
@@ -60,19 +63,19 @@ func NewEasyArchiveWriter(
 		return nil, err
 	}
 
+	saveOptions := archiver.Options{}.ApplyDefaults()
+
 	writer := archiver.NewSnapshotWriter(
 		lockCtx,
 		repo,
-		archiver.Options{},
+		saveOptions,
 		archiver.SnapshotOptions{},
 		func(bytes uint64) {},
 		func(file string, err error) error { return err },
 		func(snPath, filename string, meta archiver.ToNoder, ignoreXattrListError bool) (*restic.Node, error) {
-			return nil, nil
+			return meta.ToNode(ignoreXattrListError)
 		},
 	)
-
-	writer.StartPackUploader()
 
 	wg := &sync.WaitGroup{}
 
@@ -83,13 +86,19 @@ func NewEasyArchiveWriter(
 		unlock:  unlock,
 	}
 
+	ch := make(chan struct{})
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		writer.StartPackUploader()
 		writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
+			ch <- struct{}{}
 			return workCb(ctx, eaw)
 		})
 	}()
+
+	<-ch
 
 	return eaw, nil
 }
