@@ -51,6 +51,10 @@ func init() {
 	f.StringVar(&initOptions.RepositoryVersion, "repository-version", "stable", "repository format version to use, allowed values are a format version, 'latest' and 'stable'")
 }
 
+func RunInit(ctx context.Context, opts InitOptions, gopts GlobalOptions) error {
+	return runInit(ctx, opts, gopts, nil)
+}
+
 func runInit(ctx context.Context, opts InitOptions, gopts GlobalOptions, args []string) error {
 	if len(args) > 0 {
 		return errors.Fatal("the init command expects no arguments, only options - please see `restic help init` for usage and flags")

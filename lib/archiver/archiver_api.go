@@ -23,10 +23,6 @@ func GetDefaultEasyArchiverOptions() EasyArchiverOptions {
 	return cm_main.GetGlobalOptions()
 }
 
-type EasyArchiver struct {
-	options EasyArchiverOptions
-}
-
 type EasyArchiveReader struct {
 	options EasyArchiverOptions
 	ctx     context.Context
@@ -39,6 +35,19 @@ type EasyArchiveWriter struct {
 	writer  *archiver.SnapshotWriter
 	wg      *sync.WaitGroup
 	unlock  func()
+}
+
+func InitNewRepository(
+	ctx context.Context,
+	opts cm_main.InitOptions,
+	gopts cm_main.GlobalOptions,
+) error {
+	err := cm_main.RunInit(ctx, opts, gopts)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func NewEasyArchiveWriter(
