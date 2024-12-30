@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	cm_main "github.com/restic/restic/cmd/restic"
@@ -36,12 +39,86 @@ type EasyArchiveReader struct {
 	unlock  func()
 }
 
+type InMemoryTreeNode struct {
+	node         *model.Node
+	childsLoaded bool
+	childs       []*InMemoryTreeNode
+}
+
+func (n *InMemoryTreeNode) LoadDirData(ctx context.Context, repo restic.BlobLoader) error {
+	if n.node.Type != model.NodeTypeDir {
+		return fmt.Errorf("LoadDirData() called on non-dir node")
+	}
+
+	if n.node.Subtree.IsNull() {
+		// new node
+		n.childsLoaded = true
+		return nil
+	}
+
+	if n.childsLoaded {
+		return nil
+	}
+
+	tree, err := restic.LoadTree(ctx, repo, *n.node.Subtree)
+	if err != nil {
+		return err
+	}
+
+	for _, node := range tree.Nodes {
+		treeNode := &InMemoryTreeNode{
+			node: node,
+		}
+		n.childs = append(n.childs, treeNode)
+	}
+
+	n.childsLoaded = true
+
+	return nil
+}
+
+func (n *InMemoryTreeNode) SaveDirTree(ctx context.Context, r restic.BlobSaver) (*restic.ID, error) {
+
+	if n.node.Type != model.NodeTypeDir {
+		return nil, fmt.Errorf("SaveDirTree() called on non-dir node")
+	}
+
+	if !n.childsLoaded {
+		// node was not touched - no changes - no need to save
+		log.Printf("SaveDirTree(%v, %v, %v) - skip %v", n.node.Name, n.node.Path, n.node.Type, n.node.Subtree)
+		return n.node.Subtree, nil
+	}
+
+	newTree := &restic.Tree{
+		Nodes: make([]*restic.Node, len(n.childs)),
+	}
+	for i, child := range n.childs {
+		if child.node.Type == model.NodeTypeDir {
+			_, err := child.SaveDirTree(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+		}
+		newTree.Nodes[i] = child.node
+	}
+
+	log.Printf("SaveDirTree(%v, %v, %v, %v) - before %v", n.node.Name, n.node.Path, n.node.Type, len(newTree.Nodes), n.node.Subtree)
+
+	newTreeID, err := restic.SaveTree(ctx, r, newTree)
+	if err != nil {
+		return nil, err
+	}
+	n.node.Subtree = &newTreeID
+	log.Printf("SaveDirTree(%v, %v, %v, %v) - after %v", n.node.Name, n.node.Path, n.node.Type, len(newTree.Nodes), n.node.Subtree)
+	return &newTreeID, nil
+}
+
 type EasyArchiveWriter struct {
 	options EasyArchiverOptions
 	writer  *archiver.SnapshotWriter
 	wg      *errgroup.Group
 	unlock  func()
-	root    *restic.Tree
+	root    *InMemoryTreeNode
 }
 
 func InitNewRepository(
@@ -117,6 +194,10 @@ func NewEasyArchiveWriter(
 		return nil, err
 	}
 
+	eaw.root = &InMemoryTreeNode{
+		node: &model.Node{Name: "", Path: "/", Type: model.NodeTypeDir, Size: 0, Subtree: &restic.ID{}},
+	}
+
 	sn, _, err := (&restic.SnapshotFilter{
 		Hosts: []string{hostname},
 		Paths: []string{},
@@ -127,12 +208,7 @@ func NewEasyArchiveWriter(
 	}
 
 	if sn != nil {
-		parentTree, err := restic.LoadTree(lockCtx, repo, *sn.Tree)
-		if err != nil {
-			return nil, err
-		}
-
-		eaw.root = parentTree
+		eaw.root.node.Subtree = sn.Tree
 	}
 
 	ch := make(chan error)
@@ -151,7 +227,7 @@ func NewEasyArchiveWriter(
 				return err
 			}
 
-			rootTreeID, err := restic.SaveTree(lockCtx, repo, eaw.root)
+			rootTreeID, err := eaw.root.SaveDirTree(ctx, writer.GetRepo())
 			if err != nil {
 				return err
 			}
@@ -161,7 +237,7 @@ func NewEasyArchiveWriter(
 				return err
 			}
 
-			snap.Tree = &rootTreeID
+			snap.Tree = rootTreeID
 			summary.BackupEnd = time.Now()
 			snap.Summary = &restic.SnapshotSummary{
 				BackupStart: summary.BackupStart,
@@ -293,10 +369,6 @@ func (a *EasyArchiveWriter) UpdateFile(
 	downloadBlockDataCb DownloadBlockDataCallback,
 ) error {
 
-	if a.root == nil {
-		a.root = &restic.Tree{}
-	}
-
 	_, fileSaver, _ := a.writer.GetSavers()
 	fch := &EasyFileChunker{
 		blockSize:           blockSize,
@@ -317,9 +389,50 @@ func (a *EasyArchiveWriter) UpdateFile(
 
 	<-ch
 
-	a.root.Nodes = append(a.root.Nodes, meta)
+	a.updateTree(ctx, meta)
 
 	return nil
+}
+
+func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
+
+	log.Printf("updateTree(%v, %v, %v, %v)", node.Name, node.Type, node.Size, node.Path)
+
+	currDir := a.root
+	currDir.LoadDirData(ctx, a.writer.GetRepo())
+	log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
+		currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
+
+	pathElements := strings.Split(node.Path, "/")
+	if pathElements[0] == "" {
+		pathElements = pathElements[1:]
+	}
+	if len(pathElements) >= 1 && pathElements[len(pathElements)-1] == "" {
+		pathElements = pathElements[:len(pathElements)-1]
+	}
+	for _, part := range pathElements {
+		pos := slices.IndexFunc(currDir.childs, func(c *InMemoryTreeNode) bool {
+			return c.node.Name == part
+		})
+
+		if pos >= 0 {
+			currDir = currDir.childs[pos]
+		} else {
+			newDir := &InMemoryTreeNode{
+				node: &model.Node{Name: part, Path: filepath.Join(currDir.node.Path, currDir.node.Name), Type: model.NodeTypeDir, Size: 0, Subtree: &restic.ID{}},
+			}
+			currDir.childs = append(currDir.childs, newDir)
+			currDir = newDir
+		}
+		currDir.LoadDirData(ctx, a.writer.GetRepo())
+		log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
+			currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
+	}
+
+	// add file to found or created dir
+	currDir.childs = append(currDir.childs, &InMemoryTreeNode{
+		node: node,
+	})
 }
 
 func (a *EasyArchiveReader) LoadDataBlob(ctx context.Context, id model.ID) ([]byte, error) {
@@ -405,7 +518,11 @@ func (a *EasyArchiveReader) ReadFile(
 			}
 			return nil // continue walking
 		} else {
-			return walker.ErrSkipNode
+			if node.Type == restic.NodeTypeDir {
+				return walker.ErrSkipNode
+			} else {
+				return nil
+			}
 		}
 	}
 
@@ -443,5 +560,5 @@ func (a *EasyArchiveReader) ReadFile(
 		}
 	}
 
-	return buffer, nil
+	return buffer[:offset], nil
 }
