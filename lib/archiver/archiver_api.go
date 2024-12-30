@@ -397,6 +397,7 @@ func (a *EasyArchiveWriter) UpdateFile(
 	_, fileSaver, _ := a.writer.GetSavers()
 	fch := &EasyFileChunker{
 		blockSize:           blockSize,
+		fileSize:            meta.Size,
 		hashList:            meta.Content,
 		currentIdx:          0,
 		blockStatusCb:       blockStatusCb,
