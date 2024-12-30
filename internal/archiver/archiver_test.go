@@ -2035,7 +2035,7 @@ type failSaveRepo struct {
 func (f *failSaveRepo) SaveBlob(ctx context.Context, t restic.BlobType, chunk filechunker.ChunkI, storeDuplicate bool) (restic.ID, bool, int, error) {
 	val := atomic.AddInt32(&f.cnt, 1)
 	if val >= f.failAfter {
-		return restic.Hash(chunk.Data()), false, 0, f.err
+		return restic.Hash(filechunker.ConvenientData(chunk)), false, 0, f.err
 	}
 
 	return f.archiverRepo.SaveBlob(ctx, t, chunk, storeDuplicate)

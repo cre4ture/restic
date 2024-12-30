@@ -17,8 +17,8 @@ func treeSaveHelper(_ context.Context, _ restic.BlobType, chunk filechunker.Chun
 	cb(saveBlobResponse{
 		id:         restic.NewRandomID(),
 		known:      false,
-		length:     len(chunk.Data()),
-		sizeInRepo: len(chunk.Data()),
+		length:     len(filechunker.ConvenientData(chunk)),
+		sizeInRepo: len(filechunker.ConvenientData(chunk)),
 	})
 }
 

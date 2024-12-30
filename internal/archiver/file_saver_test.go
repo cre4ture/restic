@@ -36,9 +36,9 @@ func startFileSaver(ctx context.Context, t testing.TB, fsInst fs.FS) (*fileSaver
 
 	saveBlob := func(ctx context.Context, tpe restic.BlobType, chunk filechunker.ChunkI, _ string, cb func(saveBlobResponse)) {
 		cb(saveBlobResponse{
-			id:         restic.Hash(chunk.Data()),
-			length:     len(chunk.Data()),
-			sizeInRepo: len(chunk.Data()),
+			id:         restic.Hash(filechunker.ConvenientData(chunk)),
+			length:     len(filechunker.ConvenientData(chunk)),
+			sizeInRepo: len(filechunker.ConvenientData(chunk)),
 			known:      false,
 		})
 	}

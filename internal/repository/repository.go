@@ -874,13 +874,17 @@ func (r *Repository) SaveBlob(ctx context.Context, t restic.BlobType, chunk file
 	// compute plaintext hash if not already set
 	id := restic.ID(chunk.PcHash())
 	if id.IsNull() {
+		data, err := chunk.Data()
+		if err != nil {
+			return restic.ID{}, false, 0, err
+		}
 		// Special case the hash calculation for all zero chunks. This is especially
 		// useful for sparse files containing large all zero regions. For these we can
 		// process chunks as fast as we can read the from disk.
-		if chunk.Size() == chunker.MinSize && restic.ZeroPrefixLen(chunk.Data()) == chunker.MinSize {
+		if chunk.Size() == chunker.MinSize && restic.ZeroPrefixLen(data) == chunker.MinSize {
 			newID = ZeroChunk()
 		} else {
-			newID = restic.Hash(chunk.Data())
+			newID = restic.Hash(data)
 		}
 	} else {
 		newID = id
@@ -891,7 +895,11 @@ func (r *Repository) SaveBlob(ctx context.Context, t restic.BlobType, chunk file
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {
-		size, err = r.saveAndEncrypt(ctx, t, chunk.Data(), newID)
+		data, err := chunk.Data()
+		if err != nil {
+			return restic.ID{}, false, 0, err
+		}
+		size, err = r.saveAndEncrypt(ctx, t, data, newID)
 	}
 
 	return newID, known, size, err

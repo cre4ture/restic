@@ -23,14 +23,22 @@ func (t WritableTreeMap) SaveBlob(_ context.Context, tpe restic.BlobType, chunk 
 
 	id := restic.ID(chunk.PcHash())
 	if id.IsNull() {
-		id = restic.Hash(chunk.Data())
+		data, err := chunk.Data()
+		if err != nil {
+			return restic.ID{}, false, 0, err
+		}
+		id = restic.Hash(data)
 	}
 	_, ok := t.TreeMap[id]
 	if ok {
 		return id, false, 0, nil
 	}
 
-	t.TreeMap[id] = append([]byte{}, chunk.Data()...)
+	data, err := chunk.Data()
+	if err != nil {
+		return restic.ID{}, false, 0, err
+	}
+	t.TreeMap[id] = append([]byte{}, data...)
 	return id, true, int(chunk.Size()), nil
 }
 
