@@ -340,15 +340,15 @@ type EasyFileChunk struct {
 }
 
 // Data implements filechunker.ChunkI.
-func (e *EasyFileChunk) Data() []byte {
+func (e *EasyFileChunk) Data() ([]byte, error) {
 	if e.data == nil {
 		data, err := e.downloadBlockDataCb(uint64(e.blockIdx), e.hash[:])
 		if err != nil {
-			panic(fmt.Sprintf("EasyFileChunk(): error downloading block data: %v", err))
+			return nil, err
 		}
 		e.data = data
 	}
-	return e.data
+	return e.data, nil
 }
 
 // PcHash implements filechunker.ChunkI.
