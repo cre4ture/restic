@@ -112,6 +112,29 @@ func NewEasyArchiveWriter(
 		root:    nil,
 	}
 
+	snapshotLister, err := restic.MemorizeList(ctx, repo, restic.SnapshotFile)
+	if err != nil {
+		return nil, err
+	}
+
+	sn, _, err := (&restic.SnapshotFilter{
+		Hosts: []string{hostname},
+		Paths: []string{},
+		Tags:  restic.TagLists(nil),
+	}).FindLatest(ctx, snapshotLister, repo, "latest")
+	if (err != nil) && (!errors.Is(err, restic.ErrNoSnapshotFound)) {
+		return nil, err
+	}
+
+	if sn != nil {
+		parentTree, err := restic.LoadTree(lockCtx, repo, *sn.Tree)
+		if err != nil {
+			return nil, err
+		}
+
+		eaw.root = parentTree
+	}
+
 	ch := make(chan error)
 
 	wg.Go(func() error {
