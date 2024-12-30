@@ -28,6 +28,14 @@ type EasyArchiverInitOptions = cm_main.InitOptions
 type EasyArchiverSnapshotOptions = archiver.SnapshotOptions
 type TagLists = restic.TagLists
 
+type BlockUpdateStatus int
+
+const (
+	BlockUpdateStatusError BlockUpdateStatus = iota
+	BlockUpdateStatusCached
+	BlockUpdateStatusDownloaded
+)
+
 func GetDefaultEasyArchiverOptions() EasyArchiverOptions {
 	return cm_main.GetGlobalOptions()
 }
@@ -288,11 +296,22 @@ type EasyFileChunker struct {
 	blockSize           uint64
 	hashList            model.IDs
 	currentIdx          uint
+	blockStatusCb       func(offset uint64, blockSize uint64, status BlockUpdateStatus)
 	downloadBlockDataCb DownloadBlockDataCallback
+	lastChunk           *EasyFileChunk
 }
 
 // Next implements filechunker.ChunkerI.
 func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
+
+	if e.lastChunk != nil {
+		status := BlockUpdateStatusCached
+		if e.lastChunk.data != nil {
+			status = BlockUpdateStatusDownloaded
+		}
+		e.blockStatusCb(uint64(e.lastChunk.blockIdx)*e.blockSize, e.lastChunk.blockSize, status)
+		e.lastChunk = nil
+	}
 
 	if e.currentIdx >= uint(len(e.hashList)) {
 		return nil, io.EOF
@@ -307,6 +326,7 @@ func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
 	}
 
 	e.currentIdx += 1
+	e.lastChunk = nextChunk
 
 	return nextChunk, nil
 }
@@ -366,6 +386,7 @@ func (a *EasyArchiveWriter) UpdateFile(
 	path string,
 	meta *model.Node,
 	blockSize uint64,
+	blockStatusCb func(offset uint64, blockSize uint64, status BlockUpdateStatus),
 	downloadBlockDataCb DownloadBlockDataCallback,
 ) error {
 
@@ -374,6 +395,7 @@ func (a *EasyArchiveWriter) UpdateFile(
 		blockSize:           blockSize,
 		hashList:            meta.Content,
 		currentIdx:          0,
+		blockStatusCb:       blockStatusCb,
 		downloadBlockDataCb: downloadBlockDataCb,
 	}
 	f := &EasyFile{meta: meta}
