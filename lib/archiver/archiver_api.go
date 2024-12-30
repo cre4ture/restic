@@ -294,47 +294,47 @@ type DownloadBlockDataCallback func(blockIdx uint64, hash []byte) ([]byte, error
 
 type EasyFileChunker struct {
 	blockSize           uint64
+	fileSize            uint64
 	hashList            model.IDs
 	currentIdx          uint
 	blockStatusCb       func(offset uint64, blockSize uint64, status BlockUpdateStatus)
 	downloadBlockDataCb DownloadBlockDataCallback
-	lastChunk           *EasyFileChunk
 }
 
 // Next implements filechunker.ChunkerI.
 func (e *EasyFileChunker) Next() (filechunker.ChunkI, error) {
 
-	if e.lastChunk != nil {
-		status := BlockUpdateStatusCached
-		if e.lastChunk.data != nil {
-			status = BlockUpdateStatusDownloaded
-		}
-		e.blockStatusCb(uint64(e.lastChunk.blockIdx)*e.blockSize, e.lastChunk.blockSize, status)
-		e.lastChunk = nil
-	}
-
 	if e.currentIdx >= uint(len(e.hashList)) {
 		return nil, io.EOF
 	}
 
+	b_offset := uint64(e.currentIdx) * e.blockSize
+	b_end := b_offset + e.blockSize
+	if b_end > e.fileSize {
+		b_end = e.fileSize
+	}
+
 	nextChunk := &EasyFileChunk{
-		blockSize:           e.blockSize,
+		offset:              b_offset,
+		blockSize:           b_end - b_offset,
 		hash:                e.hashList[e.currentIdx],
 		blockIdx:            e.currentIdx,
+		blockStatusCb:       e.blockStatusCb,
 		downloadBlockDataCb: e.downloadBlockDataCb,
 		data:                nil,
 	}
 
 	e.currentIdx += 1
-	e.lastChunk = nextChunk
 
 	return nextChunk, nil
 }
 
 type EasyFileChunk struct {
+	offset              uint64
 	blockSize           uint64
 	blockIdx            uint
 	hash                [32]byte
+	blockStatusCb       func(offset uint64, blockSize uint64, status BlockUpdateStatus)
 	downloadBlockDataCb DownloadBlockDataCallback
 	data                []byte
 }
@@ -358,7 +358,11 @@ func (e *EasyFileChunk) PcHash() [32]byte {
 
 // Release implements filechunker.ChunkI.
 func (e *EasyFileChunk) Release() {
-	// nothing to do
+	status := BlockUpdateStatusCached
+	if e.data != nil {
+		status = BlockUpdateStatusDownloaded
+	}
+	e.blockStatusCb(e.offset, e.blockSize, status)
 }
 
 // Size implements filechunker.ChunkI.
