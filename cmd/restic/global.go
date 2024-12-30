@@ -263,7 +263,9 @@ func Warnf(format string, args ...interface{}) {
 
 func ResolvePassword(opts *GlobalOptions) error {
 	err := error(nil)
-	opts.password, err = resolvePassword(*opts, "RESTIC_PASSWORD")
+	if opts.password == "" {
+		opts.password, err = resolvePassword(*opts, "RESTIC_PASSWORD")
+	}
 	return err
 }
 
