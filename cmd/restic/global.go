@@ -170,6 +170,10 @@ func GetGlobalOptions() GlobalOptions {
 	return globalOptions
 }
 
+func (o *GlobalOptions) SetPassword(pwd string) {
+	o.password = pwd
+}
+
 func stdinIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
