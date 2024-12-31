@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	cm_main "github.com/restic/restic/cmd/restic"
@@ -126,7 +127,9 @@ type EasyArchiveWriter struct {
 	writer  *archiver.SnapshotWriter
 	wg      *errgroup.Group
 	unlock  func()
-	root    *InMemoryTreeNode
+
+	rootMutex sync.Mutex
+	root      *InMemoryTreeNode
 }
 
 func InitNewRepository(
@@ -235,7 +238,12 @@ func NewEasyArchiveWriter(
 				return err
 			}
 
-			rootTreeID, err := eaw.root.SaveDirTree(ctx, writer.GetRepo())
+			var rootTreeID *restic.ID
+			func() {
+				eaw.rootMutex.Lock()
+				defer eaw.rootMutex.Unlock()
+				rootTreeID, err = eaw.root.SaveDirTree(ctx, writer.GetRepo())
+			}()
 			if err != nil {
 				return err
 			}
@@ -422,6 +430,9 @@ func (a *EasyArchiveWriter) UpdateFile(
 }
 
 func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
+
+	a.rootMutex.Lock()
+	defer a.rootMutex.Unlock()
 
 	log.Printf("updateTree(%v, %v, %v, %v)", node.Name, node.Type, node.Size, node.Path)
 
