@@ -904,21 +904,32 @@ func (snw *SnapshotWriter) GetSavers() (blobSaver *blobSaver, fileSaver *fileSav
 	return snw.blobSaver, snw.fileSaver, snw.treeSaver
 }
 
-func (snw *SnapshotWriter) StartPackUploader() {
-	snw.repo.StartPackUploader(snw.wgUpCtx, snw.wgUp)
+func (snw *SnapshotWriter) StartPackUploader(ctx context.Context, wg *errgroup.Group) {
+	snw.repo.StartPackUploader(ctx, wg)
 }
 
 func (snw *SnapshotWriter) StartWorker(callback func(context.Context, *errgroup.Group) error) error {
 	wgUp := snw.wgUp
 	wgUpCtx := snw.wgUpCtx
 
+	workerWg, workerCtx := errgroup.WithContext(context.Background())
+	cleanUpCtx := context.Background()
+
 	wgUp.Go(func() error {
 		wg, wgCtx := errgroup.WithContext(wgUpCtx)
 
 		wg.Go(func() error {
-			snw.runWorkers(wgCtx, wg)
+			snw.runWorkers(workerCtx, workerWg)
 			err := callback(wgCtx, wg)
+			err2 := snw.repo.Flush(cleanUpCtx)
+			if err == nil {
+				err = err2
+			}
 			snw.stopWorkers()
+			err3 := workerWg.Wait()
+			if err == nil {
+				err = err3
+			}
 			return err
 		})
 
@@ -930,7 +941,7 @@ func (snw *SnapshotWriter) StartWorker(callback func(context.Context, *errgroup.
 			return err
 		}
 
-		return snw.repo.Flush(snw.ctx)
+		return nil
 	})
 	err := wgUp.Wait()
 	if err != nil {
@@ -996,7 +1007,8 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 
 	var rootTreeID restic.ID
 
-	snw.StartPackUploader()
+	wgUpLoader, wgUpLoaderCtx := errgroup.WithContext(ctx)
+	snw.StartPackUploader(wgUpLoaderCtx, wgUpLoader)
 
 	start := time.Now()
 

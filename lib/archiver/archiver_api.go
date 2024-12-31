@@ -230,7 +230,8 @@ func NewEasyArchiveWriter(
 			BackupStart: time.Now(),
 		}
 
-		writer.StartPackUploader()
+		wgUpLoader, wgUpLoaderCtx := errgroup.WithContext(ctx)
+		writer.StartPackUploader(wgUpLoaderCtx, wgUpLoader)
 		err := writer.StartWorker(func(ctx context.Context, g *errgroup.Group) error {
 			ch <- nil
 			err := workCb(ctx, eaw)
