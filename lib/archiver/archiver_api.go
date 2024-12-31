@@ -437,7 +437,16 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 	log.Printf("updateTree(%v, %v, %v, %v)", node.Name, node.Type, node.Size, node.Path)
 
 	currDir := a.root
-	currDir.LoadDirData(ctx, a.writer.GetRepo())
+	err := currDir.LoadDirData(ctx, a.writer.GetRepo())
+	if err != nil {
+		log.Printf("updateTree(%v, %v, %v, %v) resetting root - error: %v", node.Name, node.Type, node.Size, node.Path, err)
+		a.root = &InMemoryTreeNode{
+			node:         &model.Node{Name: "", Path: "/", Type: model.NodeTypeDir, Size: 0, Subtree: &restic.ID{}},
+			childsLoaded: true,
+			childs:       []*InMemoryTreeNode{},
+		}
+		return
+	}
 	log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
 		currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
 
@@ -462,7 +471,15 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 			currDir.childs = append(currDir.childs, newDir)
 			currDir = newDir
 		}
-		currDir.LoadDirData(ctx, a.writer.GetRepo())
+		err = currDir.LoadDirData(ctx, a.writer.GetRepo())
+		if err != nil {
+			log.Printf("updateTree(%v, %v, %v, %v) resetting currDir - error: %v", currDir.node.Name, currDir.node.Type, currDir.node.Size, currDir.node.Path, err)
+			currDir.node = &model.Node{Name: "", Path: "/", Type: model.NodeTypeDir, Size: 0, Subtree: &restic.ID{}}
+			currDir.childsLoaded = true
+			currDir.childs = []*InMemoryTreeNode{}
+			return
+		}
+
 		log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
 			currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
 	}
