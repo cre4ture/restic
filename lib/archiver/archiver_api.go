@@ -273,7 +273,8 @@ func NewEasyArchiveWriter(
 				TotalBytesProcessed: summary.ProcessedBytes,
 			}
 
-			_, err = restic.SaveSnapshot(lockCtx, repo, snap)
+			_, err = restic.SaveSnapshot(ctx, repo, snap)
+			log.Printf("SaveSnapshot() = %v", err)
 			if err != nil {
 				return err
 			}
