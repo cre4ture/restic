@@ -439,8 +439,7 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 
 	log.Printf("updateTree(%v, %v, %v, %v)", node.Name, node.Type, node.Size, node.Path)
 
-	currDir := a.root
-	err := currDir.LoadDirData(ctx, a.writer.GetRepo())
+	err := a.root.LoadDirData(ctx, a.writer.GetRepo())
 	if err != nil {
 		log.Printf("updateTree(%v, %v, %v, %v) resetting root - error: %v", node.Name, node.Type, node.Size, node.Path, err)
 		a.root = &InMemoryTreeNode{
@@ -450,6 +449,7 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 		}
 		return
 	}
+	currDir := a.root
 	log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
 		currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
 
