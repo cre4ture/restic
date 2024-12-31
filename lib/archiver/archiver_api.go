@@ -238,11 +238,13 @@ func NewEasyArchiveWriter(
 				return err
 			}
 
+			cleanupCtx := context.Background()
+
 			var rootTreeID *restic.ID
 			func() {
 				eaw.rootMutex.Lock()
 				defer eaw.rootMutex.Unlock()
-				rootTreeID, err = eaw.root.SaveDirTree(ctx, writer.GetRepo())
+				rootTreeID, err = eaw.root.SaveDirTree(cleanupCtx, writer.GetRepo())
 			}()
 			if err != nil {
 				return err
@@ -273,7 +275,7 @@ func NewEasyArchiveWriter(
 				TotalBytesProcessed: summary.ProcessedBytes,
 			}
 
-			_, err = restic.SaveSnapshot(ctx, repo, snap)
+			_, err = restic.SaveSnapshot(cleanupCtx, repo, snap)
 			log.Printf("SaveSnapshot() = %v", err)
 			if err != nil {
 				return err
