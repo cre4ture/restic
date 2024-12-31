@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var ErrFileCompletedWithNullID = errors.New("completed file with null ID")
+
 // saveBlobFn saves a blob to a repo.
 type saveBlobFn func(context.Context, restic.BlobType, filechunker.ChunkI, string, func(res saveBlobResponse))
 
@@ -148,7 +150,9 @@ func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.Chunker
 		target: target,
 	}
 	var lock sync.Mutex
-	remaining := 0
+	// require one additional completeFuture() call to ensure that the future only completes
+	// after reaching the end of this method
+	remaining := 1
 	isCompleted := false
 
 	completeBlob := func() {
@@ -162,7 +166,8 @@ func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.Chunker
 			}
 			for _, id := range fnr.node.Content {
 				if id.IsNull() {
-					panic("completed file with null ID")
+					fnr.err = ErrFileCompletedWithNullID
+					break
 				}
 			}
 			isCompleted = true
@@ -229,10 +234,20 @@ func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.Chunker
 
 		lock.Lock()
 		node.Content = append(node.Content, restic.ID{})
+		remaining += 1
 		lock.Unlock()
 
 		s.saveBlob(ctx, restic.DataBlob, chunk, target, func(sbr saveBlobResponse) {
+
+			defer completeBlob()
 			lock.Lock()
+			defer lock.Unlock()
+
+			if sbr.err != nil {
+				node.Content[pos] = restic.ID{}
+				return
+			}
+
 			if !sbr.known {
 				fnr.stats.DataBlobs++
 				fnr.stats.DataSize += uint64(sbr.length)
@@ -240,9 +255,6 @@ func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.Chunker
 			}
 
 			node.Content[pos] = sbr.id
-			lock.Unlock()
-
-			completeBlob()
 		})
 		idx++
 
@@ -263,11 +275,6 @@ func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.Chunker
 	}
 
 	fnr.node = node
-	lock.Lock()
-	// require one additional completeFuture() call to ensure that the future only completes
-	// after reaching the end of this method
-	remaining += idx + 1
-	lock.Unlock()
 	finishReading()
 	completeBlob()
 }

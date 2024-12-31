@@ -65,13 +65,14 @@ type saveBlobResponse struct {
 	length     int
 	sizeInRepo int
 	known      bool
+	err        error
 }
 
 func (s *blobSaver) saveBlob(ctx context.Context, t restic.BlobType, chunk filechunker.ChunkI) (saveBlobResponse, error) {
 	id, known, sizeInRepo, err := s.repo.SaveBlob(ctx, t, chunk, false)
 
 	if err != nil {
-		return saveBlobResponse{}, err
+		return saveBlobResponse{err: err}, err
 	}
 
 	return saveBlobResponse{
@@ -79,6 +80,7 @@ func (s *blobSaver) saveBlob(ctx context.Context, t restic.BlobType, chunk filec
 		length:     int(chunk.Size()),
 		sizeInRepo: sizeInRepo,
 		known:      known,
+		err:        nil,
 	}, nil
 }
 
@@ -95,12 +97,18 @@ func (s *blobSaver) worker(ctx context.Context, jobs <-chan saveBlobJob) error {
 			}
 		}
 
-		res, err := s.saveBlob(ctx, job.BlobType, job.chunk)
-		if err != nil {
-			debug.Log("saveBlob returned error, exiting: %v", err)
-			return fmt.Errorf("failed to save blob from file %q: %w", job.fn, err)
-		}
-		job.cb(res)
-		job.chunk.Release()
+		func() {
+			defer job.chunk.Release()
+			err := error(nil)
+			res := &saveBlobResponse{}
+			defer func() {
+				job.cb(*res)
+			}()
+			*res, err = s.saveBlob(ctx, job.BlobType, job.chunk)
+			if err != nil {
+				debug.Log("failed to save blob from file %q: %w", job.fn, err)
+				res.err = fmt.Errorf("failed to save blob from file %q: %w", job.fn, err)
+			}
+		}()
 	}
 }

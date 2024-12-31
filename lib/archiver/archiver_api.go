@@ -59,13 +59,20 @@ func (n *InMemoryTreeNode) LoadDirData(ctx context.Context, repo restic.BlobLoad
 		return fmt.Errorf("LoadDirData() called on non-dir node")
 	}
 
-	if n.node.Subtree.IsNull() {
+	if n.childsLoaded {
+		return nil
+	}
+
+	if n.node.Subtree == nil {
 		// new node
+		n.node.Subtree = &restic.ID{}
 		n.childsLoaded = true
 		return nil
 	}
 
-	if n.childsLoaded {
+	if n.node.Subtree.IsNull() {
+		// new node
+		n.childsLoaded = true
 		return nil
 	}
 
@@ -406,6 +413,11 @@ func (a *EasyArchiveWriter) UpdateFile(
 	downloadBlockDataCb DownloadBlockDataCallback,
 ) error {
 
+	if meta.Type != model.NodeTypeFile {
+		a.updateTree(ctx, meta)
+		return nil
+	}
+
 	_, fileSaver, _ := a.writer.GetSavers()
 	fch := &EasyFileChunker{
 		blockSize:           blockSize,
@@ -417,12 +429,14 @@ func (a *EasyArchiveWriter) UpdateFile(
 	}
 	f := &EasyFile{meta: meta}
 	ch := make(chan error)
+	result := error(nil)
 	fileSaver.SaveFileGeneric(ctx, fch, path, path, f, func() {
 		// start
 	}, func() {
 		// completeReading
 	}, func(snPath, target string, stats archiver.ItemStats, err error) {
 		// finish
+		result = err
 		close(ch)
 	})
 
@@ -430,15 +444,10 @@ func (a *EasyArchiveWriter) UpdateFile(
 
 	a.updateTree(ctx, meta)
 
-	return nil
+	return result
 }
 
-func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
-
-	a.rootMutex.Lock()
-	defer a.rootMutex.Unlock()
-
-	log.Printf("updateTree(%v, %v, %v, %v)", node.Name, node.Type, node.Size, node.Path)
+func (a *EasyArchiveWriter) updateTree_findParent(ctx context.Context, node *model.Node) (*InMemoryTreeNode, error) {
 
 	err := a.root.LoadDirData(ctx, a.writer.GetRepo())
 	if err != nil {
@@ -448,8 +457,8 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 			childsLoaded: true,
 			childs:       []*InMemoryTreeNode{},
 		}
-		return
 	}
+
 	currDir := a.root
 	log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
 		currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
@@ -475,23 +484,61 @@ func (a *EasyArchiveWriter) updateTree(ctx context.Context, node *model.Node) {
 			currDir.childs = append(currDir.childs, newDir)
 			currDir = newDir
 		}
+
 		err = currDir.LoadDirData(ctx, a.writer.GetRepo())
 		if err != nil {
 			log.Printf("updateTree(%v, %v, %v, %v) resetting currDir - error: %v", currDir.node.Name, currDir.node.Type, currDir.node.Size, currDir.node.Path, err)
 			currDir.node = &model.Node{Name: "", Path: "/", Type: model.NodeTypeDir, Size: 0, Subtree: &restic.ID{}}
 			currDir.childsLoaded = true
 			currDir.childs = []*InMemoryTreeNode{}
-			return
 		}
 
 		log.Printf("updateTree(%v, %v, %v, %v) - parent: %v, %v, %v", node.Name, node.Type, node.Size, node.Path,
 			currDir.node.Name, currDir.node.Path, currDir.node.Subtree)
 	}
 
-	// add file to found or created dir
-	currDir.childs = append(currDir.childs, &InMemoryTreeNode{
-		node: node,
+	return currDir, nil
+}
+
+func (a *EasyArchiveWriter) updateTree(ctx context.Context, newFileNode *model.Node) {
+
+	a.rootMutex.Lock()
+	defer a.rootMutex.Unlock()
+
+	log.Printf("updateTree(%v, %v, %v, %v)", newFileNode.Name, newFileNode.Type, newFileNode.Size, newFileNode.Path)
+
+	currDir, err := a.updateTree_findParent(ctx, newFileNode)
+	if err != nil {
+		log.Printf("updateTree(%v, %v, %v, %v) - error: %v", newFileNode.Name, newFileNode.Type, newFileNode.Size, newFileNode.Path, err)
+		return
+	}
+
+	pos := slices.IndexFunc(currDir.childs, func(c *InMemoryTreeNode) bool {
+		return c.node.Name == newFileNode.Name
 	})
+
+	if pos < 0 {
+		// add file to found or created dir
+		currDir.childs = append(currDir.childs, &InMemoryTreeNode{
+			node: newFileNode,
+		})
+		return // done
+	}
+
+	// update existing file
+	existing := currDir.childs[pos]
+	if (existing.node.Type == model.NodeTypeDir) &&
+		(newFileNode.Type == model.NodeTypeDir) {
+		// ensure to load the directory content, before overwriting the metadata
+		existing.LoadDirData(ctx, a.writer.GetRepo())
+		newFileNode.Subtree = existing.node.Subtree
+	}
+
+	existing.node = newFileNode
+	if newFileNode.Type != model.NodeTypeDir {
+		existing.childsLoaded = false
+		existing.childs = nil
+	}
 }
 
 func (a *EasyArchiveReader) LoadDataBlob(ctx context.Context, id model.ID) ([]byte, error) {
