@@ -218,7 +218,7 @@ func NewEasyArchiveWriter(
 
 	sn, _, err := (&restic.SnapshotFilter{
 		Hosts: []string{hostname},
-		Paths: []string{},
+		Paths: targets,
 		Tags:  restic.TagLists(nil),
 	}).FindLatest(ctx, snapshotLister, repo, "latest")
 	if (err != nil) && (!errors.Is(err, restic.ErrNoSnapshotFound)) {
@@ -406,7 +406,6 @@ func (e *EasyFile) ToNode(ignoreXattrListError bool) (*restic.Node, error) {
 
 func (a *EasyArchiveWriter) UpdateFile(
 	ctx context.Context,
-	path string,
 	meta *model.Node,
 	blockSize uint64,
 	blockStatusCb func(offset uint64, blockSize uint64, status BlockUpdateStatus),
@@ -430,7 +429,7 @@ func (a *EasyArchiveWriter) UpdateFile(
 	f := &EasyFile{meta: meta}
 	ch := make(chan error)
 	result := error(nil)
-	fileSaver.SaveFileGeneric(ctx, fch, path, path, f, func() {
+	fileSaver.SaveFileGeneric(ctx, fch, meta.GetFullFilepath(), meta.GetFullFilepath(), f, func() {
 		// start
 	}, func() {
 		// completeReading

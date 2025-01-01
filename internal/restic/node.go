@@ -114,6 +114,14 @@ type Node struct {
 	Path string `json:"-"`
 }
 
+func (n *Node) GetFullFilepath() string {
+	if strings.HasSuffix(n.Path, "/") || strings.HasPrefix(n.Name, "/") {
+		return n.Path + n.Name
+	} else {
+		return n.Path + "/" + n.Name
+	}
+}
+
 // Nodes is a slice of nodes that can be sorted.
 type Nodes []*Node
 
