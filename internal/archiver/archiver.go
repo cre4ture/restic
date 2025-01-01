@@ -97,11 +97,10 @@ type Archiver struct {
 	FS           fs.FS
 	Options      Options
 
-	blobSaver *blobSaver
-	fileSaver *fileSaver
-	treeSaver *treeSaver
-	mu        sync.Mutex
-	summary   *Summary
+	mu      sync.Mutex
+	summary *Summary
+
+	snw *SnapshotWriter
 
 	// Error is called for all errors that occur during backup.
 	Error ErrorFunc
@@ -192,6 +191,7 @@ func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 		Select:       func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
 		FS:           filesystem,
 		Options:      opts.ApplyDefaults(),
+		snw:          nil,
 
 		CompleteItem: func(string, *restic.Node, *restic.Node, ItemStats, time.Duration) {},
 		StartFile:    func(string) {},
@@ -199,6 +199,33 @@ func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 	}
 
 	return arch
+}
+
+// New initializes a new archiver.
+func NewSnapshotWriter(
+	ctx context.Context,
+	repo archiverRepo,
+	Options Options,
+	opts SnapshotOptions,
+	CompleteBlob func(bytes uint64),
+	Error ErrorFunc,
+	NodeFromFileInfo func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error),
+) *SnapshotWriter {
+	wgUp, wgUpCtx := errgroup.WithContext(ctx)
+	return &SnapshotWriter{
+		repo:             repo,
+		opts:             opts,
+		ctx:              ctx,
+		wgUpCtx:          wgUpCtx,
+		wgUp:             wgUp,
+		Options:          Options,
+		blobSaver:        nil,
+		fileSaver:        nil,
+		treeSaver:        nil,
+		CompleteBlob:     CompleteBlob,
+		Error:            Error,
+		NodeFromFileInfo: NodeFromFileInfo,
+	}
 }
 
 // error calls arch.Error if it is set and the error is different from context.Canceled.
@@ -353,7 +380,7 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 		nodes = append(nodes, fn)
 	}
 
-	fn := arch.treeSaver.Save(ctx, snPath, dir, treeNode, nodes, complete)
+	fn := arch.snw.treeSaver.Save(ctx, snPath, dir, treeNode, nodes, complete)
 
 	return fn, nil
 }
@@ -563,7 +590,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		closeFile = false
 
 		// Save will close the file, we don't need to do that
-		fn = arch.fileSaver.Save(ctx, snPath, target, meta, func() {
+		fn = arch.snw.fileSaver.Save(ctx, snPath, target, meta, func() {
 			arch.StartFile(snPath)
 		}, func() {
 			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
@@ -727,7 +754,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		nodes = append(nodes, fn)
 	}
 
-	fn := arch.treeSaver.Save(ctx, snPath, atree.FileInfoPath, node, nodes, complete)
+	fn := arch.snw.treeSaver.Save(ctx, snPath, atree.FileInfoPath, node, nodes, complete)
 	return fn, len(nodes), nil
 }
 
@@ -826,20 +853,20 @@ func (arch *Archiver) loadParentTree(ctx context.Context, sn *restic.Snapshot) *
 }
 
 // runWorkers starts the worker pools, which are stopped when the context is cancelled.
-func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group) {
-	arch.blobSaver = newBlobSaver(ctx, wg, arch.Repo, arch.Options.SaveBlobConcurrency)
+func (arch *SnapshotWriter) runWorkers(ctx context.Context, wg *errgroup.Group) {
+	arch.blobSaver = newBlobSaver(ctx, wg, arch.repo, arch.Options.SaveBlobConcurrency)
 
 	arch.fileSaver = newFileSaver(ctx, wg,
 		arch.blobSaver.Save,
-		arch.Repo.Config().ChunkerPolynomial,
+		arch.repo.Config().ChunkerPolynomial,
 		arch.Options.ReadConcurrency, arch.Options.SaveBlobConcurrency)
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
-	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
+	arch.fileSaver.NodeFromFileInfo = arch.NodeFromFileInfo
 
 	arch.treeSaver = newTreeSaver(ctx, wg, arch.Options.SaveTreeConcurrency, arch.blobSaver.Save, arch.Error)
 }
 
-func (arch *Archiver) stopWorkers() {
+func (arch *SnapshotWriter) stopWorkers() {
 	arch.blobSaver.TriggerShutdown()
 	arch.fileSaver.TriggerShutdown()
 	arch.treeSaver.TriggerShutdown()
@@ -848,8 +875,122 @@ func (arch *Archiver) stopWorkers() {
 	arch.treeSaver = nil
 }
 
+type SnapshotWriter struct {
+	repo    archiverRepo
+	opts    SnapshotOptions
+	ctx     context.Context
+	wgUpCtx context.Context
+	wgUp    *errgroup.Group
+
+	Options   Options
+	blobSaver *blobSaver
+	fileSaver *fileSaver
+	treeSaver *treeSaver
+
+	// CompleteBlob is called for all saved blobs for files.
+	CompleteBlob func(bytes uint64)
+
+	// Error is called for all errors that occur during backup.
+	Error ErrorFunc
+
+	NodeFromFileInfo func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error)
+}
+
+func (snw *SnapshotWriter) GetRepo() archiverRepo {
+	return snw.repo
+}
+
+func (snw *SnapshotWriter) GetSavers() (blobSaver *blobSaver, fileSaver *fileSaver, treeSaver *treeSaver) {
+	return snw.blobSaver, snw.fileSaver, snw.treeSaver
+}
+
+func (snw *SnapshotWriter) StartPackUploader(ctx context.Context, wg *errgroup.Group) {
+	snw.repo.StartPackUploader(ctx, wg)
+}
+
+func (snw *SnapshotWriter) StartWorker(callback func(context.Context, *errgroup.Group) error) error {
+	wgUp := snw.wgUp
+	wgUpCtx := snw.wgUpCtx
+
+	workerWg, workerCtx := errgroup.WithContext(context.Background())
+	cleanUpCtx := context.Background()
+
+	wgUp.Go(func() error {
+		wg, wgCtx := errgroup.WithContext(wgUpCtx)
+
+		wg.Go(func() error {
+			snw.runWorkers(workerCtx, workerWg)
+			err := callback(wgCtx, wg)
+			err2 := snw.repo.Flush(cleanUpCtx)
+			if err == nil {
+				err = err2
+			}
+			snw.stopWorkers()
+			err3 := workerWg.Wait()
+			if err == nil {
+				err = err3
+			}
+			return err
+		})
+
+		err := wg.Wait()
+		debug.Log("err is %v", err)
+
+		if err != nil {
+			debug.Log("error while saving tree: %v", err)
+			return err
+		}
+
+		return nil
+	})
+	err := wgUp.Wait()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (snw *SnapshotWriter) PrepareSnapshot(targets []string) (*restic.Snapshot, error) {
+	sn, err := restic.NewSnapshot(targets, snw.opts.Tags, snw.opts.Hostname, snw.opts.Time)
+	if err != nil {
+		return nil, err
+	}
+
+	sn.ProgramVersion = snw.opts.ProgramVersion
+	sn.Excludes = snw.opts.Excludes
+	if snw.opts.ParentSnapshot != nil {
+		sn.Parent = snw.opts.ParentSnapshot.ID()
+	}
+
+	return sn, nil
+}
+
+func (snw *SnapshotWriter) SaveSnapshot(sn *restic.Snapshot, summary *restic.SnapshotSummary) (restic.ID, error) {
+
+	sn.Summary = summary
+	id, err := restic.SaveSnapshot(snw.ctx, snw.repo, sn)
+	if err != nil {
+		return restic.ID{}, err
+	}
+
+	return id, nil
+}
+
+func (arch *Archiver) NewSnapshotWriter(ctx context.Context, opts SnapshotOptions) *SnapshotWriter {
+	snw := NewSnapshotWriter(ctx, arch.Repo, arch.Options, opts, arch.CompleteBlob, arch.Error, arch.nodeFromFileInfo)
+	arch.snw = snw
+	return snw
+}
+
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*restic.Snapshot, restic.ID, *Summary, error) {
+
+	snw := arch.NewSnapshotWriter(ctx, opts)
+	defer func() {
+		arch.snw = nil
+	}()
+
 	arch.summary = &Summary{
 		BackupStart: opts.BackupStart,
 	}
@@ -866,53 +1007,38 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 
 	var rootTreeID restic.ID
 
-	wgUp, wgUpCtx := errgroup.WithContext(ctx)
-	arch.Repo.StartPackUploader(wgUpCtx, wgUp)
+	wgUpLoader, wgUpLoaderCtx := errgroup.WithContext(ctx)
+	snw.StartPackUploader(wgUpLoaderCtx, wgUpLoader)
 
-	wgUp.Go(func() error {
-		wg, wgCtx := errgroup.WithContext(wgUpCtx)
-		start := time.Now()
+	start := time.Now()
 
-		wg.Go(func() error {
-			arch.runWorkers(wgCtx, wg)
+	err = snw.StartWorker(func(wgCtx context.Context, wg *errgroup.Group) error {
 
-			debug.Log("starting snapshot")
-			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *restic.Node, is ItemStats) {
-				arch.trackItem("/", nil, nil, is, time.Since(start))
-			})
-			if err != nil {
-				return err
-			}
-
-			fnr := fn.take(wgCtx)
-			if fnr.err != nil {
-				return fnr.err
-			}
-
-			if wgCtx.Err() != nil {
-				return wgCtx.Err()
-			}
-
-			if nodeCount == 0 {
-				return errors.New("snapshot is empty")
-			}
-
-			rootTreeID = *fnr.node.Subtree
-			arch.stopWorkers()
-			return nil
+		debug.Log("starting snapshot")
+		fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *restic.Node, is ItemStats) {
+			arch.trackItem("/", nil, nil, is, time.Since(start))
 		})
-
-		err = wg.Wait()
-		debug.Log("err is %v", err)
-
 		if err != nil {
-			debug.Log("error while saving tree: %v", err)
 			return err
 		}
 
-		return arch.Repo.Flush(ctx)
+		fnr := fn.take(wgCtx)
+		if fnr.err != nil {
+			return fnr.err
+		}
+
+		if wgCtx.Err() != nil {
+			return wgCtx.Err()
+		}
+
+		if nodeCount == 0 {
+			return errors.New("snapshot is empty")
+		}
+
+		rootTreeID = *fnr.node.Subtree
+		return nil
 	})
-	err = wgUp.Wait()
+
 	if err != nil {
 		return nil, restic.ID{}, nil, err
 	}
@@ -924,19 +1050,14 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		}
 	}
 
-	sn, err := restic.NewSnapshot(targets, opts.Tags, opts.Hostname, opts.Time)
+	sn, err := snw.PrepareSnapshot(targets)
 	if err != nil {
 		return nil, restic.ID{}, nil, err
 	}
 
-	sn.ProgramVersion = opts.ProgramVersion
-	sn.Excludes = opts.Excludes
-	if opts.ParentSnapshot != nil {
-		sn.Parent = opts.ParentSnapshot.ID()
-	}
 	sn.Tree = &rootTreeID
 	arch.summary.BackupEnd = time.Now()
-	sn.Summary = &restic.SnapshotSummary{
+	finalSummary := &restic.SnapshotSummary{
 		BackupStart: arch.summary.BackupStart,
 		BackupEnd:   arch.summary.BackupEnd,
 
@@ -954,7 +1075,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		TotalBytesProcessed: arch.summary.ProcessedBytes,
 	}
 
-	id, err := restic.SaveSnapshot(ctx, arch.Repo, sn)
+	id, err := snw.SaveSnapshot(sn, finalSummary)
 	if err != nil {
 		return nil, restic.ID{}, nil, err
 	}

@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"context"
@@ -49,6 +49,10 @@ func init() {
 	initSecondaryRepoOptions(f, &initOptions.secondaryRepoOptions, "secondary", "to copy chunker parameters from")
 	f.BoolVar(&initOptions.CopyChunkerParameters, "copy-chunker-params", false, "copy chunker parameters from the secondary repository (useful with the copy command)")
 	f.StringVar(&initOptions.RepositoryVersion, "repository-version", "stable", "repository format version to use, allowed values are a format version, 'latest' and 'stable'")
+}
+
+func RunInit(ctx context.Context, opts InitOptions, gopts GlobalOptions) error {
+	return runInit(ctx, opts, gopts, nil)
 }
 
 func runInit(ctx context.Context, opts InitOptions, gopts GlobalOptions, args []string) error {

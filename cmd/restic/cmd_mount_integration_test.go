@@ -1,7 +1,7 @@
 //go:build darwin || freebsd || linux
 // +build darwin freebsd linux
 
-package main
+package cm_main
 
 import (
 	"context"

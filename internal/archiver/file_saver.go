@@ -9,13 +9,16 @@ import (
 	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/filechunker"
 	"github.com/restic/restic/internal/fs"
 	"github.com/restic/restic/internal/restic"
 	"golang.org/x/sync/errgroup"
 )
 
+var ErrFileCompletedWithNullID = errors.New("completed file with null ID")
+
 // saveBlobFn saves a blob to a repo.
-type saveBlobFn func(context.Context, restic.BlobType, *buffer, string, func(res saveBlobResponse))
+type saveBlobFn func(context.Context, restic.BlobType, filechunker.ChunkI, string, func(res saveBlobResponse))
 
 // fileSaver concurrently saves incoming files to the repo.
 type fileSaver struct {
@@ -105,8 +108,41 @@ type saveFileJob struct {
 	complete        fileCompleteFunc
 }
 
+type CloseAndToNoder interface {
+	io.Closer
+	ToNoder
+}
+
 // saveFile stores the file f in the repo, then closes it.
-func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
+func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPath string, target string, fr fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
+
+	fch := &NormalFileChunker{
+		s:        s,
+		chnker:   chnker,
+		f:        fr,
+		initDone: false,
+	}
+
+	s.saveFileGeneric(ctx, fch, snPath, target, fr, start, finishReading, finish)
+}
+
+func (s *fileSaver) SaveFileGeneric(
+	ctx context.Context,
+	fch filechunker.ChunkerI,
+	snPath string,
+	target string,
+	f CloseAndToNoder,
+	start func(),
+	finishReading func(),
+	finish func(snPath, target string, stats ItemStats, err error),
+) {
+	s.saveFileGeneric(ctx, fch, snPath, target, f, start, finishReading, func(res futureNodeResult) {
+		finish(res.snPath, res.target, res.stats, res.err)
+	})
+}
+
+func (s *fileSaver) saveFileGeneric(ctx context.Context, fch filechunker.ChunkerI, snPath string, target string, f CloseAndToNoder, start func(), finishReading func(), finish func(res futureNodeResult)) {
+
 	start()
 
 	fnr := futureNodeResult{
@@ -114,7 +150,9 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 		target: target,
 	}
 	var lock sync.Mutex
-	remaining := 0
+	// require one additional completeFuture() call to ensure that the future only completes
+	// after reaching the end of this method
+	remaining := 1
 	isCompleted := false
 
 	completeBlob := func() {
@@ -128,7 +166,8 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 			}
 			for _, id := range fnr.node.Content {
 				if id.IsNull() {
-					panic("completed file with null ID")
+					fnr.err = ErrFileCompletedWithNullID
+					break
 				}
 			}
 			isCompleted = true
@@ -166,22 +205,17 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 		return
 	}
 
-	// reuse the chunker
-	chnker.Reset(f, s.pol)
-
 	node.Content = []restic.ID{}
 	node.Size = 0
 	var idx int
 	for {
-		buf := s.saveFilePool.Get()
-		chunk, err := chnker.Next(buf.Data)
+		chunk, err := fch.Next()
+
 		if err == io.EOF {
-			buf.Release()
 			break
 		}
 
-		buf.Data = chunk.Data
-		node.Size += uint64(chunk.Length)
+		node.Size += chunk.Size()
 
 		if err != nil {
 			_ = f.Close()
@@ -200,10 +234,20 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 
 		lock.Lock()
 		node.Content = append(node.Content, restic.ID{})
+		remaining += 1
 		lock.Unlock()
 
-		s.saveBlob(ctx, restic.DataBlob, buf, target, func(sbr saveBlobResponse) {
+		s.saveBlob(ctx, restic.DataBlob, chunk, target, func(sbr saveBlobResponse) {
+
+			defer completeBlob()
 			lock.Lock()
+			defer lock.Unlock()
+
+			if sbr.err != nil {
+				node.Content[pos] = restic.ID{}
+				return
+			}
+
 			if !sbr.known {
 				fnr.stats.DataBlobs++
 				fnr.stats.DataSize += uint64(sbr.length)
@@ -211,9 +255,6 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 			}
 
 			node.Content[pos] = sbr.id
-			lock.Unlock()
-
-			completeBlob()
 		})
 		idx++
 
@@ -224,7 +265,7 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 			return
 		}
 
-		s.CompleteBlob(uint64(len(chunk.Data)))
+		s.CompleteBlob(chunk.Size())
 	}
 
 	err = f.Close()
@@ -234,13 +275,37 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker *chunker.Chunker, snPat
 	}
 
 	fnr.node = node
-	lock.Lock()
-	// require one additional completeFuture() call to ensure that the future only completes
-	// after reaching the end of this method
-	remaining += idx + 1
-	lock.Unlock()
 	finishReading()
 	completeBlob()
+}
+
+type NormalFileChunker struct {
+	s        *fileSaver
+	chnker   *chunker.Chunker
+	f        fs.File
+	initDone bool
+}
+
+func (c *NormalFileChunker) Next() (filechunker.ChunkI, error) {
+
+	if !c.initDone {
+		c.initDone = true
+		// reuse the chunker
+		c.chnker.Reset(c.f, c.s.pol)
+	}
+
+	buf := c.s.saveFilePool.Get()
+	chunk, err := c.chnker.Next(buf.Data)
+
+	if err == io.EOF {
+		buf.Release()
+	}
+
+	if err != io.EOF {
+		buf.Data = chunk.Data
+	}
+
+	return filechunker.NewRawDataChunk(chunk.Data), err
 }
 
 func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {

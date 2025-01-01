@@ -19,6 +19,7 @@ import (
 	"github.com/restic/restic/internal/crypto"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/filechunker"
 	"github.com/restic/restic/internal/repository/index"
 	"github.com/restic/restic/internal/repository/pack"
 	"github.com/restic/restic/internal/restic"
@@ -864,21 +865,26 @@ func (r *Repository) Close() error {
 // Also returns if the blob was already known before.
 // If the blob was not known before, it returns the number of bytes the blob
 // occupies in the repo (compressed or not, including encryption overhead).
-func (r *Repository) SaveBlob(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
+func (r *Repository) SaveBlob(ctx context.Context, t restic.BlobType, chunk filechunker.ChunkI, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
 
-	if int64(len(buf)) > math.MaxUint32 {
+	if chunk.Size() > math.MaxUint32 {
 		return restic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
 	}
 
 	// compute plaintext hash if not already set
+	id := restic.ID(chunk.PcHash())
 	if id.IsNull() {
+		data, err := chunk.Data()
+		if err != nil {
+			return restic.ID{}, false, 0, err
+		}
 		// Special case the hash calculation for all zero chunks. This is especially
 		// useful for sparse files containing large all zero regions. For these we can
 		// process chunks as fast as we can read the from disk.
-		if len(buf) == chunker.MinSize && restic.ZeroPrefixLen(buf) == chunker.MinSize {
+		if chunk.Size() == chunker.MinSize && restic.ZeroPrefixLen(data) == chunker.MinSize {
 			newID = ZeroChunk()
 		} else {
-			newID = restic.Hash(buf)
+			newID = restic.Hash(data)
 		}
 	} else {
 		newID = id
@@ -889,7 +895,11 @@ func (r *Repository) SaveBlob(ctx context.Context, t restic.BlobType, buf []byte
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {
-		size, err = r.saveAndEncrypt(ctx, t, buf, newID)
+		data, err := chunk.Data()
+		if err != nil {
+			return restic.ID{}, false, 0, err
+		}
+		size, err = r.saveAndEncrypt(ctx, t, data, newID)
 	}
 
 	return newID, known, size, err

@@ -1,4 +1,4 @@
-package main
+package cm_main
 
 import (
 	"bufio"
@@ -166,6 +166,14 @@ func init() {
 	}
 }
 
+func GetGlobalOptions() GlobalOptions {
+	return globalOptions
+}
+
+func (o *GlobalOptions) SetPassword(pwd string) {
+	o.password = pwd
+}
+
 func stdinIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
@@ -251,6 +259,14 @@ func Warnf(format string, args ...interface{}) {
 		fmt.Fprintf(os.Stderr, "unable to write to stderr: %v\n", err)
 	}
 	debug.Log(format, args...)
+}
+
+func ResolvePassword(opts *GlobalOptions) error {
+	err := error(nil)
+	if opts.password == "" {
+		opts.password, err = resolvePassword(*opts, "RESTIC_PASSWORD")
+	}
+	return err
 }
 
 // resolvePassword determines the password to be used for opening the repository.

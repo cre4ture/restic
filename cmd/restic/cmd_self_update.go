@@ -1,6 +1,6 @@
 //go:build selfupdate
 
-package main
+package cm_main
 
 import (
 	"context"
